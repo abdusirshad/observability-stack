@@ -1,0 +1,16 @@
+# yamllint configuration - relaxed enough for compose/Prometheus, strict on errors.
+extends: relaxed
+
+rules:
+  line-length:
+    max: 160
+    level: warning
+  comments:
+    min-spaces-from-content: 1
+  document-start: disable
+  truthy:
+    allowed-values: ["true", "false", "on"]
+    check-keys: false
+
+ignore: |
+  grafana/dashboards/

@@ -1,0 +1,15 @@
+# Auto-load every dashboard JSON mounted at /var/lib/grafana/dashboards.
+apiVersion: 1
+
+providers:
+  - name: "observability-stack"
+    orgId: 1
+    folder: "Observability"
+    type: file
+    disableDeletion: false
+    editable: true
+    updateIntervalSeconds: 30
+    allowUiUpdates: true
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

@@ -1,0 +1,58 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  yaml-lint:
+    name: yamllint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run yamllint
+        uses: ibiqlik/action-yamllint@v3
+        with:
+          config_file: .yamllint.yml
+          file_or_dir: >-
+            docker-compose.yml
+            prometheus/
+            alertmanager/
+            grafana/provisioning/
+            .github/
+
+  promtool:
+    name: promtool config & rules
+    runs-on: ubuntu-latest
+    container:
+      image: prom/prometheus:v3.1.0
+      options: --entrypoint ""
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check Prometheus config
+        run: promtool check config prometheus/prometheus.yml
+      - name: Check recording & alerting rules
+        run: promtool check rules prometheus/rules/recording-rules.yml prometheus/rules/alerts.yml
+
+  app:
+    name: sample-app py-compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Compile-check sources
+        run: python -m py_compile app/main.py
+      - name: Validate requirements install
+        run: pip install --dry-run -r app/requirements.txt
+
+  compose:
+    name: docker compose config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate compose file
+        run: docker compose config -q
