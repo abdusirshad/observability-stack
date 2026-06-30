@@ -1,0 +1,151 @@
+# ---------------------------------------------------------------------------
+# Observability stack: Prometheus + Grafana + Alertmanager + node-exporter
+# + an instrumented sample FastAPI app exposing /metrics.
+#
+# Quickstart:  make up   (or: docker compose up -d)
+# Author:      Md Irshad - Senior Cloud & AI Platform Engineer
+# ---------------------------------------------------------------------------
+name: observability-stack
+
+services:
+  # -------------------------------------------------------------------------
+  # Prometheus - scrapes itself, node-exporter and the sample app.
+  # Loads alerting + SLO recording rules from prometheus/rules.
+  # -------------------------------------------------------------------------
+  prometheus:
+    image: prom/prometheus:v3.1.0
+    container_name: obs-prometheus
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --web.enable-lifecycle
+      - --web.console.libraries=/usr/share/prometheus/console_libraries
+      - --web.console.templates=/usr/share/prometheus/consoles
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "9090:9090"
+    depends_on:
+      - sample-app
+      - node-exporter
+      - alertmanager
+    networks:
+      - obs
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # -------------------------------------------------------------------------
+  # Alertmanager - self-contained null/webhook receiver out of the box.
+  # See alertmanager/alertmanager.yml for where to wire Slack / PagerDuty.
+  # -------------------------------------------------------------------------
+  alertmanager:
+    image: prom/alertmanager:v0.28.0
+    container_name: obs-alertmanager
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    ports:
+      - "9093:9093"
+    networks:
+      - obs
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9093/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # -------------------------------------------------------------------------
+  # Grafana - datasource + dashboards auto-provisioned from grafana/provisioning.
+  # Default login admin / admin (override via .env, see .env.example).
+  # -------------------------------------------------------------------------
+  grafana:
+    image: grafana/grafana:11.4.0
+    container_name: obs-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    networks:
+      - obs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  # -------------------------------------------------------------------------
+  # node-exporter - host/container metrics (USE method dashboard source).
+  # -------------------------------------------------------------------------
+  node-exporter:
+    image: prom/node-exporter:v1.8.2
+    container_name: obs-node-exporter
+    restart: unless-stopped
+    command:
+      - --path.rootfs=/host
+      - --collector.disable-defaults
+      - --collector.cpu
+      - --collector.meminfo
+      - --collector.loadavg
+      - --collector.filesystem
+      - --collector.netdev
+    pid: host
+    volumes:
+      - /:/host:ro,rslave
+    ports:
+      - "9100:9100"
+    networks:
+      - obs
+
+  # -------------------------------------------------------------------------
+  # Sample app - tiny FastAPI service instrumented with prometheus_client.
+  # Exposes /, /work, /error and /metrics. See app/ for source.
+  # -------------------------------------------------------------------------
+  sample-app:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    image: observability-stack/sample-app:latest
+    container_name: obs-sample-app
+    restart: unless-stopped
+    environment:
+      APP_PORT: "8000"
+    ports:
+      - "8000:8000"
+    networks:
+      - obs
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0) if urllib.request.urlopen('http://localhost:8000/healthz').status==200 else sys.exit(1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+networks:
+  obs:
+    driver: bridge
+
+volumes:
+  prometheus-data:
+  alertmanager-data:
+  grafana-data:

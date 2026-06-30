@@ -1,0 +1,71 @@
+# ---------------------------------------------------------------------------
+# Alertmanager configuration.
+#
+# Self-contained by default: critical alerts go to a local webhook receiver
+# (Alertmanager's own logs / any HTTP sink), everything else is grouped and
+# routed to a "null" receiver so the stack runs with zero external secrets.
+#
+# To wire real paging, uncomment the slack_configs / pagerduty_configs blocks
+# below and supply the secrets via environment substitution or a templated
+# secret file - DO NOT commit real keys. See README "Wiring real receivers".
+# ---------------------------------------------------------------------------
+global:
+  resolve_timeout: 5m
+
+# Notification templates (Alertmanager ships sensible defaults; add custom
+# templates here by mounting files and referencing them).
+templates:
+  - /etc/alertmanager/templates/*.tmpl
+
+route:
+  receiver: "default-webhook"
+  group_by: ["alertname", "service", "severity"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+  routes:
+    # Critical, page-worthy alerts. Wire PagerDuty here in production.
+    - matchers:
+        - severity = "critical"
+      receiver: "critical-webhook"
+      continue: true
+
+    # SLO burn alerts get their own grouping/channel in production.
+    - matchers:
+        - slo =~ ".+"
+      receiver: "default-webhook"
+
+# Suppress lower-severity noise while a critical alert for the same service
+# is already firing.
+inhibit_rules:
+  - source_matchers:
+      - severity = "critical"
+    target_matchers:
+      - severity = "warning"
+    equal: ["service"]
+
+receivers:
+  # Default receiver: a webhook. Out of the box this points at a non-routable
+  # placeholder so nothing leaves the host; replace with a real sink or Slack.
+  - name: "default-webhook"
+    webhook_configs:
+      - url: "http://127.0.0.1:5001/webhook"
+        send_resolved: true
+
+  - name: "critical-webhook"
+    webhook_configs:
+      - url: "http://127.0.0.1:5001/critical"
+        send_resolved: true
+
+    # --- Wiring real receivers (uncomment + supply secrets) ----------------
+    # slack_configs:
+    #   - api_url: ${SLACK_WEBHOOK_URL}      # store in a secret, never commit
+    #     channel: "#slo-alerts"
+    #     send_resolved: true
+    #     title: "{{ .CommonAnnotations.summary }}"
+    #     text: "{{ .CommonAnnotations.description }}"
+    # pagerduty_configs:
+    #   - routing_key: ${PAGERDUTY_ROUTING_KEY}
+    #     description: "{{ .CommonAnnotations.summary }}"
+    #     severity: "{{ .CommonLabels.severity }}"

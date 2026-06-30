@@ -1,0 +1,114 @@
+# ---------------------------------------------------------------------------
+# Alerting rules.
+#
+# 1. Availability  - multi-window, multi-burn-rate SLO alerts (Google SRE).
+# 2. Latency       - p99 latency SLO breach.
+# 3. Targets/infra - scrape target down, high CPU, low disk.
+#
+# SLO: 99% availability over 30 days  =>  error budget = 1% (0.01).
+# Burn-rate thresholds below are budget-consumption multipliers:
+#   14.4x over 1h  -> exhausts a 30d budget in ~2h  (page)
+#    6x   over 6h  -> exhausts a 30d budget in ~5d  (ticket)
+# ---------------------------------------------------------------------------
+groups:
+  # -- Availability SLO: multi-window multi-burn-rate ------------------------
+  - name: sample-app.slo.availability
+    rules:
+      - alert: ErrorBudgetBurnFast
+        expr: |
+          service:http_requests_error_ratio:rate1h{service="sample-app"} > (14.4 * 0.01)
+          and
+          service:http_requests_error_ratio:rate5m_bw{service="sample-app"} > (14.4 * 0.01)
+        for: 2m
+        labels:
+          severity: critical
+          team: platform
+          slo: availability
+        annotations:
+          summary: "Fast error-budget burn on {{ $labels.service }} (14.4x)"
+          description: >
+            {{ $labels.service }} is burning its 30-day error budget at 14.4x
+            the sustainable rate. At this pace the budget is exhausted in ~2h.
+            Current 1h error ratio: {{ $value | humanizePercentage }}.
+          runbook_url: "https://github.com/abdusirshad/observability-stack/blob/main/docs/runbooks.md#error-budget-burn"
+
+      - alert: ErrorBudgetBurnSlow
+        expr: |
+          service:http_requests_error_ratio:rate6h{service="sample-app"} > (6 * 0.01)
+          and
+          service:http_requests_error_ratio:rate30m{service="sample-app"} > (6 * 0.01)
+        for: 15m
+        labels:
+          severity: warning
+          team: platform
+          slo: availability
+        annotations:
+          summary: "Slow error-budget burn on {{ $labels.service }} (6x)"
+          description: >
+            {{ $labels.service }} is burning its 30-day error budget at 6x the
+            sustainable rate (6h window). Current 6h error ratio:
+            {{ $value | humanizePercentage }}.
+          runbook_url: "https://github.com/abdusirshad/observability-stack/blob/main/docs/runbooks.md#error-budget-burn"
+
+  # -- Latency SLO ------------------------------------------------------------
+  - name: sample-app.slo.latency
+    rules:
+      - alert: LatencySLOBreachP99
+        expr: |
+          service:http_request_duration_seconds:p99_5m{service="sample-app"} > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          team: platform
+          slo: latency
+        annotations:
+          summary: "p99 latency SLO breach on {{ $labels.service }}"
+          description: >
+            p99 request latency for {{ $labels.service }} is
+            {{ $value | humanizeDuration }} over the last 5m, above the 500ms SLO.
+          runbook_url: "https://github.com/abdusirshad/observability-stack/blob/main/docs/runbooks.md#latency-slo-breach"
+
+  # -- Targets / infrastructure ----------------------------------------------
+  - name: infrastructure.targets
+    rules:
+      - alert: TargetDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+          team: platform
+        annotations:
+          summary: "Scrape target down: {{ $labels.job }} / {{ $labels.instance }}"
+          description: >
+            Prometheus has been unable to scrape {{ $labels.job }}
+            ({{ $labels.instance }}) for more than 1 minute.
+
+      - alert: HighNodeCpuUsage
+        expr: |
+          100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) > 90
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "High CPU usage on {{ $labels.instance }}"
+          description: >
+            CPU usage on {{ $labels.instance }} has been above 90% for 10m
+            (current: {{ $value | humanize }}%).
+
+      - alert: LowDiskSpace
+        expr: |
+          (
+            node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"}
+              /
+            node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}
+          ) * 100 < 10
+        for: 10m
+        labels:
+          severity: warning
+          team: platform
+        annotations:
+          summary: "Low disk space on {{ $labels.instance }} ({{ $labels.mountpoint }})"
+          description: >
+            Less than 10% disk space remaining on {{ $labels.mountpoint }}
+            of {{ $labels.instance }} (current: {{ $value | humanize }}%).

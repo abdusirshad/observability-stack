@@ -1,0 +1,81 @@
+# ---------------------------------------------------------------------------
+# SLO/SLI recording rules.
+#
+# Pre-computes the signals the alerts and Grafana dashboards consume so they
+# stay cheap to evaluate and consistent across the stack. Naming follows the
+# Prometheus convention  level:metric:operation.
+#
+# SLO target for sample-app: 99% of requests succeed (error budget = 1%).
+# ---------------------------------------------------------------------------
+groups:
+  # -- RED: rate / errors -----------------------------------------------------
+  - name: sample-app.sli.recording
+    interval: 15s
+    rules:
+      # Total request rate (5m), per service.
+      - record: service:http_requests:rate5m
+        expr: sum by (service) (rate(http_requests_total[5m]))
+
+      # Error request rate (5m): any 5xx response.
+      - record: service:http_requests_errors:rate5m
+        expr: sum by (service) (rate(http_requests_total{status=~"5.."}[5m]))
+
+      # Error ratio (5m) - the core availability SLI. Guard against 0/0.
+      - record: service:http_requests_error_ratio:rate5m
+        expr: |
+          service:http_requests_errors:rate5m
+            /
+          clamp_min(service:http_requests:rate5m, 1e-9)
+
+      # Success ratio (5m).
+      - record: service:http_requests_success_ratio:rate5m
+        expr: 1 - service:http_requests_error_ratio:rate5m
+
+  # -- RED: duration / latency ------------------------------------------------
+  - name: sample-app.latency.recording
+    interval: 15s
+    rules:
+      # p99 request latency (5m), per service.
+      - record: service:http_request_duration_seconds:p99_5m
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (service, le) (rate(http_request_duration_seconds_bucket[5m]))
+          )
+
+      # p50 request latency (5m), per service.
+      - record: service:http_request_duration_seconds:p50_5m
+        expr: |
+          histogram_quantile(
+            0.50,
+            sum by (service, le) (rate(http_request_duration_seconds_bucket[5m]))
+          )
+
+  # -- Multi-window error ratios for burn-rate alerting -----------------------
+  # Each window feeds a multi-window/multi-burn-rate alert (Google SRE model).
+  - name: sample-app.burnrate.recording
+    interval: 30s
+    rules:
+      - record: service:http_requests_error_ratio:rate5m_bw
+        expr: |
+          sum by (service) (rate(http_requests_total{status=~"5.."}[5m]))
+            /
+          clamp_min(sum by (service) (rate(http_requests_total[5m])), 1e-9)
+
+      - record: service:http_requests_error_ratio:rate30m
+        expr: |
+          sum by (service) (rate(http_requests_total{status=~"5.."}[30m]))
+            /
+          clamp_min(sum by (service) (rate(http_requests_total[30m])), 1e-9)
+
+      - record: service:http_requests_error_ratio:rate1h
+        expr: |
+          sum by (service) (rate(http_requests_total{status=~"5.."}[1h]))
+            /
+          clamp_min(sum by (service) (rate(http_requests_total[1h])), 1e-9)
+
+      - record: service:http_requests_error_ratio:rate6h
+        expr: |
+          sum by (service) (rate(http_requests_total{status=~"5.."}[6h]))
+            /
+          clamp_min(sum by (service) (rate(http_requests_total[6h])), 1e-9)
