@@ -26,15 +26,22 @@ jobs:
   promtool:
     name: promtool config & rules
     runs-on: ubuntu-latest
-    container:
-      image: prom/prometheus:v3.1.0
-      options: --entrypoint ""
     steps:
       - uses: actions/checkout@v4
+      # Run promtool from the official Prometheus image via docker. The repo's
+      # prometheus/ dir is mounted at /etc/prometheus so the absolute rule_files
+      # paths (/etc/prometheus/rules/*.yml) in prometheus.yml resolve correctly.
+      # (Running the whole job *inside* the prom/prometheus container fails because
+      # that image has no Node.js for actions/checkout.)
       - name: Check Prometheus config
-        run: promtool check config prometheus/prometheus.yml
+        run: |
+          docker run --rm -v "$PWD/prometheus:/etc/prometheus" --entrypoint promtool \
+            prom/prometheus:v3.1.0 check config /etc/prometheus/prometheus.yml
       - name: Check recording & alerting rules
-        run: promtool check rules prometheus/rules/recording-rules.yml prometheus/rules/alerts.yml
+        run: |
+          docker run --rm -v "$PWD/prometheus:/etc/prometheus" --entrypoint promtool \
+            prom/prometheus:v3.1.0 check rules \
+            /etc/prometheus/rules/recording-rules.yml /etc/prometheus/rules/alerts.yml
 
   app:
     name: sample-app py-compile
