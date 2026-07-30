@@ -17,29 +17,53 @@ model) and an auto-provisioned **RED/USE Grafana dashboard**.
 
 ## Architecture
 
-```
-                            ┌──────────────────────────┐
-                            │         Grafana          │  :3000
-                            │  RED / SLO dashboard      │
-                            │  (auto-provisioned)       │
-                            └─────────────┬────────────┘
-                                          │ PromQL (datasource: prometheus)
-                            ┌─────────────▼────────────┐        ┌──────────────────┐
-   scrape /metrics ───────► │        Prometheus        │ ─alerts► │   Alertmanager   │ :9093
-   scrape :9100   ───────► │  rules: recording + alerts│        │ route + receivers │
-   scrape :9090   ───────► │  (15d TSDB retention)     │        └──────────────────┘
-                            └─────────────┬────────────┘
-              ┌──────────────────────────┼───────────────────────────┐
-              │                          │                           │
-   ┌──────────▼─────────┐    ┌───────────▼──────────┐    ┌───────────▼──────────┐
-   │   sample-app :8000 │    │  node-exporter :9100 │    │  prometheus :9090    │
-   │  FastAPI + client  │    │  host CPU/mem/disk   │    │  (self-scrape)       │
-   │  counter/hist/gauge│    └──────────────────────┘    └──────────────────────┘
-   └────────────────────┘
-```
+Prometheus scrapes the sample app, node-exporter and itself every 15 s,
+evaluates recording + alerting rules, pushes firing alerts to Alertmanager, and
+serves Grafana's PromQL queries — all in one Docker Compose project on a single
+bridge network. No external services or secrets are required to run it.
 
-Everything runs in a single Docker Compose project on one bridge network. No
-external services or secrets are required to run the stack.
+![Scrape & serve topology](docs/diagrams/architecture.png)
+
+<details>
+<summary>Same diagram as Mermaid (renders inline on GitHub)</summary>
+
+```mermaid
+flowchart LR
+  subgraph compose["docker-compose: observability-stack (bridge net: obs)"]
+    subgraph targets["Scrape targets"]
+      app["sample-app :8000<br/>FastAPI /metrics"]
+      node["node-exporter :9100"]
+    end
+    prom["Prometheus :9090<br/>recording + alert rules · 15d TSDB"]
+    am["Alertmanager :9093<br/>route / group / inhibit"]
+    graf["Grafana :3000<br/>RED / SLO dashboard"]
+    subgraph recv["Receivers"]
+      wh["webhook (default)"]
+      pd["Slack / PagerDuty (documented)"]
+    end
+    app -- "scrape 15s" --> prom
+    node -- "scrape 15s" --> prom
+    prom -. "self-scrape" .-> prom
+    prom -- "fire alerts" --> am
+    am -- "notify" --> wh
+    am -. "optional" .-> pd
+    graf -- "PromQL" --> prom
+  end
+```
+</details>
+
+### Components & ports
+
+| Service | Port | Role |
+|---|---|---|
+| Grafana | `:3000` | Auto-provisioned datasource + RED/SLO dashboard (admin / admin) |
+| Prometheus | `:9090` | Scrape, rule evaluation, 15d TSDB, self-scrape |
+| Alertmanager | `:9093` | Route / group / inhibit, notify receivers |
+| sample-app | `:8000` | Instrumented FastAPI service, raw metrics at `/metrics` |
+| node-exporter | `:9100` | Host CPU / memory / disk / net (USE) |
+
+A deeper walkthrough — every diagram plus a per-rule / per-alert reference —
+lives in [`docs/architecture.md`](docs/architecture.md).
 
 ---
 
@@ -66,7 +90,13 @@ external services or secrets are required to run the stack.
 │   │   └── dashboards/dashboards.yml
 │   └── dashboards/
 │       └── sample-app-red-slo.json # RED + SLO + USE panels, loads automatically
-├── docs/runbooks.md                # runbooks linked from alert annotations
+├── docs/
+│   ├── runbooks.md                 # runbooks linked from alert annotations
+│   ├── architecture.md             # deep dive: Mermaid + per-rule/alert reference
+│   └── diagrams/                   # diagrams-as-code (mingrammer) + rendered PNGs
+│       ├── architecture.py         # -> architecture.png
+│       ├── alerting_flow.py        # -> alerting_flow.png
+│       └── requirements.txt
 ├── .github/workflows/ci.yml        # yamllint + promtool + py-compile + compose config
 ├── .env.example                    # Grafana creds + optional receiver secrets
 ├── .gitignore
@@ -162,6 +192,40 @@ The two burn-rate alerts implement the **multi-window, multi-burn-rate** pattern
 from the Google SRE workbook: a short window confirms the issue is current while
 a long window confirms it is sustained, which suppresses flapping.
 
+![Signal to alert lifecycle](docs/diagrams/alerting_flow.png)
+
+### Multi-window multi-burn-rate, at a glance
+
+Each burn alert requires **both** windows to breach a budget-consumption
+multiplier — the long window proves the burn is sustained, the short window
+proves it is still happening (and makes the alert reset fast once it stops).
+
+```mermaid
+flowchart TB
+  subgraph fast["Fast burn — page"]
+    f1["1h ratio > 14.4 × 1%"] --> fand{"AND · for 2m"}
+    f2["5m ratio > 14.4 × 1%"] --> fand
+    fand --> fpage["ErrorBudgetBurnFast<br/>critical → PAGE · ~2h to exhaust"]
+  end
+  subgraph slow["Slow burn — ticket"]
+    s1["6h ratio > 6 × 1%"] --> sand{"AND · for 15m"}
+    s2["30m ratio > 6 × 1%"] --> sand
+    sand --> sticket["ErrorBudgetBurnSlow<br/>warning → TICKET · ~5d to exhaust"]
+  end
+```
+
+**SLO / error-budget concept:** at a 1× burn rate the 1% budget lasts exactly
+30 days (99% success). 14.4× burns it in ~2 h (page); 6× in ~5 d (ticket).
+
+```mermaid
+flowchart LR
+  slo["SLO 99% / 30d"] --> budget["1% error budget"]
+  budget --> burn["burn rate = spend ÷ sustainable"]
+  burn -->|"14.4× fast"| page["page (critical)"]
+  burn -->|"6× slow"| ticket["ticket (warning)"]
+  burn -->|"≤ 1×"| ok["within budget"]
+```
+
 Each alert carries a `runbook_url` pointing at [`docs/runbooks.md`](docs/runbooks.md).
 
 ---
@@ -234,6 +298,35 @@ GitHub-hosted runners so the pipeline is green on a public fork:
 | node-exporter | `v1.8.2` |
 | Python base | `3.12-slim` |
 | FastAPI / uvicorn / prometheus_client | `0.115.6` / `0.34.0` / `0.21.1` |
+
+---
+
+## What this demonstrates
+
+- **SRE fundamentals in practice** — RED metrics, SLIs/SLOs, error budgets and
+  the Google multi-window multi-burn-rate alerting model, wired end to end.
+- **Prometheus rule design** — recording rules that pre-compute SLIs so the
+  dashboard and alerts share one cheap, consistent source of truth.
+- **Alert routing** — Alertmanager route tree, grouping, inhibition, and a clean
+  path to real Slack / PagerDuty paging without committing secrets.
+- **Observability as code** — auto-provisioned Grafana datasource + dashboard,
+  a one-command runnable stack, diagrams-as-code, and a green CI that lints YAML,
+  type-checks Prometheus config + rules, and validates the Compose file.
+
+## Diagrams
+
+The architecture and alerting-flow PNGs above are generated from
+diagrams-as-code in [`docs/diagrams/`](docs/diagrams/) (mingrammer `diagrams` +
+Graphviz):
+
+```bash
+make diagrams
+#   pip install -r docs/diagrams/requirements.txt
+#   cd docs/diagrams && python architecture.py && python alerting_flow.py
+```
+
+Mermaid mirrors of every diagram (plus the full per-rule / per-alert reference)
+live in [`docs/architecture.md`](docs/architecture.md).
 
 ---
 

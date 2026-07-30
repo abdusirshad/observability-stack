@@ -8,7 +8,7 @@ LOAD_REQUESTS  ?= 400
 
 .DEFAULT_GOAL := help
 
-.PHONY: help up down restart logs ps load validate validate-config validate-rules clean
+.PHONY: help up down restart logs ps load validate validate-config validate-rules clean diagrams
 
 help: ## Show this help.
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -54,5 +54,11 @@ validate-rules: ## promtool check rules (runs in a Prometheus container).
 	docker run --rm -v "$(CURDIR)/prometheus:/etc/prometheus:ro" \
 		--entrypoint promtool $(PROM_IMAGE) \
 		check rules /etc/prometheus/rules/recording-rules.yml /etc/prometheus/rules/alerts.yml
+
+diagrams: ## Render docs/diagrams/*.py to PNGs (needs Python `diagrams` + Graphviz `dot`).
+	@command -v dot >/dev/null 2>&1 || { echo "Graphviz 'dot' not found - install graphviz (brew/apt/conda)"; exit 1; }
+	pip install -r docs/diagrams/requirements.txt
+	cd docs/diagrams && python architecture.py && python alerting_flow.py
+	@echo "Rendered docs/diagrams/architecture.png and docs/diagrams/alerting_flow.png"
 
 clean: down ## Alias for down (remove everything).

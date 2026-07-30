@@ -1,0 +1,6 @@
+# Diagrams-as-code for the observability-stack docs.
+# Requires the Graphviz system package (the `dot` binary) on PATH.
+#   macOS:  brew install graphviz
+#   Debian: apt-get install -y graphviz
+#   conda:  conda install -c conda-forge graphviz
+diagrams==0.23.4
